@@ -1,0 +1,911 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ContriAI — understand an issue before you touch the code</title>
+<meta name="description" content="Paste a GitHub issue URL. ContriAI reads it, maps the codebase, and hands back a structured analysis so you know exactly where to start." />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,700;1,9..144,300;1,9..144,700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* ─── Design tokens ────────────────────────────────────────────────── */
+  :root {
+    /* Base */
+    --bg:              #080B14;
+    --surface:         #0E1220;
+    --surface-raised:  #141829;
+    --surface-hover:   #1A2035;
+    --border:          #1E2540;
+    --border-bright:   #2A3356;
+
+    /* Text */
+    --text:            #E8ECF5;
+    --text-muted:      #7A86A3;
+    --text-faint:      #3D4869;
+
+    /* Accent — warm amber-orange, not yellow, not blue */
+    --accent:          #FF8C42;
+    --accent-dim:      rgba(255,140,66,0.12);
+    --accent-glow:     rgba(255,140,66,0.25);
+
+    /* Diff colors — kept meaningful */
+    --add:             #4ADE80;
+    --add-bg:          rgba(74,222,128,0.07);
+    --add-border:      rgba(74,222,128,0.6);
+    --remove:          #FB7185;
+    --remove-bg:       rgba(251,113,133,0.07);
+    --remove-border:   rgba(251,113,133,0.6);
+    --context:         #94A3B8;
+
+    /* Hunk header */
+    --hunk-head-bg:    rgba(255,140,66,0.08);
+    --hunk-head-text:  #C97035;
+
+    /* Fonts */
+    --serif:  'Fraunces', Georgia, serif;
+    --mono:   'JetBrains Mono', ui-monospace, 'Cascadia Code', Menlo, monospace;
+    --sans:   'Inter', system-ui, -apple-system, sans-serif;
+
+    /* Timing */
+    --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  /* ─── Reset ────────────────────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    line-height: 1.6;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+    border-radius: 4px;
+  }
+
+  /* ─── Mesh background ──────────────────────────────────────────────── */
+  .mesh {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    overflow: hidden;
+  }
+  .mesh::before,
+  .mesh::after {
+    content: '';
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(120px);
+    opacity: 0;
+    animation: meshReveal 1.6s var(--ease-out) forwards;
+  }
+  .mesh::before {
+    width: 900px; height: 600px;
+    top: -200px; left: 50%;
+    transform: translateX(-60%);
+    background: radial-gradient(ellipse, rgba(255,140,66,0.09) 0%, transparent 70%);
+    animation-delay: 0.2s;
+  }
+  .mesh::after {
+    width: 600px; height: 500px;
+    top: 60px; right: -100px;
+    background: radial-gradient(ellipse, rgba(74,222,128,0.05) 0%, transparent 70%);
+    animation-delay: 0.5s;
+  }
+  @keyframes meshReveal {
+    to { opacity: 1; }
+  }
+
+  /* slow drift on the orbs */
+  .mesh::before { animation: meshReveal 1.6s var(--ease-out) 0.2s forwards, driftA 18s ease-in-out 2s infinite alternate; }
+  .mesh::after  { animation: meshReveal 1.6s var(--ease-out) 0.5s forwards, driftB 22s ease-in-out 2s infinite alternate; }
+  @keyframes driftA {
+    from { transform: translateX(-60%) translateY(0px); }
+    to   { transform: translateX(-50%) translateY(40px); }
+  }
+  @keyframes driftB {
+    from { transform: translateY(0px); }
+    to   { transform: translateY(-50px) translateX(-30px); }
+  }
+
+  /* ─── Layout ───────────────────────────────────────────────────────── */
+  .wrap {
+    position: relative;
+    z-index: 1;
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 72px 24px 100px;
+  }
+
+  /* ─── Hero ─────────────────────────────────────────────────────────── */
+  header.hero {
+    margin-bottom: 48px;
+    opacity: 0;
+    transform: translateY(16px);
+    animation: slideUp 0.8s var(--ease-out) 0.1s forwards;
+  }
+
+  @keyframes slideUp {
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .wordmark {
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    margin-bottom: 28px;
+  }
+  .wordmark .pip {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 4px var(--accent-dim), 0 0 12px var(--accent-glow);
+    flex-shrink: 0;
+    animation: pipPulse 3s ease-in-out 1s infinite;
+  }
+  @keyframes pipPulse {
+    0%, 100% { box-shadow: 0 0 0 4px var(--accent-dim), 0 0 10px var(--accent-glow); }
+    50%       { box-shadow: 0 0 0 6px var(--accent-dim), 0 0 20px var(--accent-glow); }
+  }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 300;
+    font-size: clamp(38px, 6vw, 62px);
+    letter-spacing: -0.02em;
+    line-height: 1.1;
+    margin: 0 0 18px;
+    color: var(--text);
+  }
+  h1 em {
+    font-style: italic;
+    font-weight: 700;
+    background: linear-gradient(95deg, var(--accent) 0%, #FFB347 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .sub {
+    color: var(--text-muted);
+    font-size: 16px;
+    font-weight: 400;
+    max-width: 52ch;
+    margin: 0;
+    line-height: 1.7;
+  }
+  .sub code {
+    font-family: var(--mono);
+    font-size: 0.88em;
+    background: var(--surface-raised);
+    border: 1px solid var(--border-bright);
+    padding: 1px 6px;
+    border-radius: 4px;
+    color: var(--text);
+  }
+
+  /* ─── Input card ───────────────────────────────────────────────────── */
+  .input-card {
+    opacity: 0;
+    transform: translateY(12px);
+    animation: slideUp 0.7s var(--ease-out) 0.35s forwards;
+    margin-bottom: 10px;
+  }
+
+  .term {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow:
+      0 0 0 1px rgba(255,255,255,0.03) inset,
+      0 24px 80px -20px rgba(0,0,0,0.8),
+      0 0 60px -30px rgba(255,140,66,0.08);
+    transition: box-shadow 200ms ease, border-color 200ms ease;
+  }
+  .term:focus-within {
+    border-color: var(--border-bright);
+    box-shadow:
+      0 0 0 1px rgba(255,255,255,0.04) inset,
+      0 24px 80px -20px rgba(0,0,0,0.8),
+      0 0 80px -20px rgba(255,140,66,0.14);
+  }
+
+  .term-titlebar {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 11px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface-raised);
+  }
+  .tdot {
+    width: 11px; height: 11px;
+    border-radius: 50%;
+    background: var(--border-bright);
+  }
+  .tdot:nth-child(1) { background: #FF5F57; }
+  .tdot:nth-child(2) { background: #FEBC2E; }
+  .tdot:nth-child(3) { background: #28C840; }
+  .term-label {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--text-faint);
+    margin-left: 6px;
+  }
+
+  form {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 18px 18px;
+    font-family: var(--mono);
+  }
+  .prompt {
+    color: var(--accent);
+    user-select: none;
+    font-size: 15px;
+    flex-shrink: 0;
+    font-weight: 600;
+  }
+  #issueUrl {
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 14px;
+    padding: 6px 0;
+    caret-color: var(--accent);
+  }
+  #issueUrl::placeholder { color: var(--text-faint); }
+  #issueUrl:focus { outline: none; }
+  #issueUrl:focus-visible { outline: none; }
+
+  button.run {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    background: var(--accent);
+    color: #0B0D14;
+    border: none;
+    border-radius: 7px;
+    padding: 9px 16px;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+    transition: background 150ms ease, transform 100ms ease, box-shadow 150ms ease;
+    box-shadow: 0 2px 12px rgba(255,140,66,0.3);
+  }
+  button.run:hover {
+    background: #FFa055;
+    box-shadow: 0 4px 20px rgba(255,140,66,0.45);
+  }
+  button.run:active { transform: translateY(1px); }
+  button.run:disabled {
+    background: var(--accent-dim);
+    color: var(--accent);
+    box-shadow: none;
+    cursor: default;
+  }
+
+  .hint {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-faint);
+    margin: 10px 2px 0;
+    min-height: 18px;
+    transition: color 300ms ease;
+  }
+  .hint.ok { color: var(--add); }
+  .hint.err { color: var(--remove); }
+
+  /* ─── Output ───────────────────────────────────────────────────────── */
+  #output { margin-top: 32px; }
+
+  /* typewriter status */
+  .status-line {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 2px 20px;
+    word-break: break-all;
+  }
+  .status-prompt { color: var(--accent); font-weight: 600; flex-shrink: 0; }
+  .status-text { color: var(--text-muted); }
+  .cursor-bar {
+    display: inline-block;
+    width: 8px; height: 16px;
+    background: var(--accent);
+    border-radius: 2px;
+    margin-left: 2px;
+    vertical-align: middle;
+    animation: blink 1s steps(1) infinite;
+    flex-shrink: 0;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* error */
+  .error-box {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--remove);
+    background: var(--remove-bg);
+    border: 1px solid var(--remove-border);
+    border-radius: 10px;
+    padding: 16px 18px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  /* meta */
+  .meta-line {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-faint);
+    margin-bottom: 20px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+  }
+  .meta-line a { color: var(--text-muted); }
+  .meta-line a:hover { color: var(--accent); }
+  .meta-sep { color: var(--text-faint); }
+
+  /* diff hunks */
+  .hunk {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    margin-bottom: 14px;
+    opacity: 0;
+    transform: translateY(10px);
+    animation: hunkIn 0.5s var(--ease-out) forwards;
+    box-shadow: 0 8px 40px -12px rgba(0,0,0,0.6);
+  }
+  @keyframes hunkIn { to { opacity: 1; transform: translateY(0); } }
+  .hunk:nth-of-type(1) { animation-delay: 20ms; }
+  .hunk:nth-of-type(2) { animation-delay: 120ms; }
+  .hunk:nth-of-type(3) { animation-delay: 220ms; }
+  .hunk:nth-of-type(4) { animation-delay: 320ms; }
+
+  .hunk-head {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--hunk-head-text);
+    background: var(--hunk-head-bg);
+    border-bottom: 1px solid rgba(255,140,66,0.1);
+    padding: 9px 18px;
+    letter-spacing: 0.03em;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .hunk-head::before {
+    content: '@@';
+    color: var(--accent);
+    opacity: 0.5;
+    font-weight: 600;
+  }
+  .hunk-head::after {
+    content: '@@';
+    color: var(--accent);
+    opacity: 0.5;
+    font-weight: 600;
+  }
+
+  .hunk-body { padding: 4px 0; }
+
+  .line {
+    display: flex;
+    gap: 14px;
+    padding: 6px 18px;
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.6;
+    border-left: 3px solid transparent;
+    transition: background 100ms ease;
+  }
+  .line:hover { background: rgba(255,255,255,0.02); }
+  .marker {
+    width: 13px;
+    flex-shrink: 0;
+    text-align: center;
+    font-weight: 600;
+    color: var(--text-faint);
+    user-select: none;
+  }
+  .text { color: var(--text); word-break: break-word; }
+
+  .line.add {
+    background: var(--add-bg);
+    border-left-color: var(--add);
+  }
+  .line.add .marker { color: var(--add); }
+  .line.add .text { color: #BBF7D0; }
+  .line.add:hover { background: rgba(74,222,128,0.1); }
+
+  .line.remove {
+    background: var(--remove-bg);
+    border-left-color: var(--remove);
+  }
+  .line.remove .marker { color: var(--remove); }
+  .line.remove .text { color: #FECDD3; }
+  .line.remove:hover { background: rgba(251,113,133,0.1); }
+
+  .line.context .marker { color: var(--text-faint); }
+  .line.context .text { color: var(--context); }
+
+  /* understanding block — break out of monospace, give it prose feel */
+  .understanding-block {
+    padding: 18px 20px;
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.75;
+    color: var(--text-muted);
+    border-left: 3px solid rgba(255,140,66,0.25);
+    margin: 4px 0;
+  }
+  .understanding-block::before {
+    content: '# ';
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-faint);
+    display: block;
+    margin-bottom: 4px;
+  }
+
+  .empty-note {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--text-faint);
+    padding: 6px 18px 14px;
+    font-style: italic;
+  }
+
+  /* ─── Footer ───────────────────────────────────────────────────────── */
+  footer {
+    margin-top: 56px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--text-faint);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  footer::before {
+    content: '';
+    display: inline-block;
+    width: 22px;
+    height: 1px;
+    background: var(--border-bright);
+    flex-shrink: 0;
+  }
+
+  /* ─── Motion preferences ───────────────────────────────────────────── */
+  @media (prefers-reduced-motion: reduce) {
+    .mesh::before, .mesh::after { animation: meshReveal 0.01ms forwards; }
+    header.hero, .input-card { animation: none; opacity: 1; transform: none; }
+    .hunk { animation: none; opacity: 1; transform: none; }
+    .cursor-bar { animation: none; }
+    .pip { animation: none; }
+  }
+
+  /* ─── Ask section ──────────────────────────────────────────────────── */
+  .section-divider {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin: 48px 0 32px;
+    opacity: 0;
+    animation: slideUp 0.7s var(--ease-out) 0.5s forwards;
+  }
+  .section-divider-line {
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+  .section-divider-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    white-space: nowrap;
+  }
+
+  .ask-card {
+    opacity: 0;
+    transform: translateY(12px);
+    animation: slideUp 0.7s var(--ease-out) 0.6s forwards;
+    margin-bottom: 10px;
+  }
+
+  /* two-row form layout for the ask card */
+  .ask-term form {
+    flex-direction: column;
+    gap: 0;
+    padding: 0;
+  }
+  .ask-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 18px;
+    font-family: var(--mono);
+    border-bottom: 1px solid var(--border);
+  }
+  .ask-row:last-child { border-bottom: none; }
+  .ask-row .prompt { color: var(--accent); font-size: 15px; font-weight: 600; flex-shrink: 0; user-select: none; }
+  .ask-row input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 14px;
+    padding: 6px 0;
+    caret-color: var(--accent);
+  }
+  .ask-row input::placeholder { color: var(--text-faint); }
+  .ask-row input:focus { outline: none; }
+  .ask-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 18px;
+    gap: 10px;
+  }
+  .ask-hint {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--text-faint);
+  }
+  #askOutput { margin-top: 24px; }
+
+  /* ─── Mobile ───────────────────────────────────────────────────────── */
+  @media (max-width: 520px) {
+    .wrap { padding: 48px 16px 72px; }
+    h1 { font-size: 32px; }
+    form { flex-wrap: wrap; gap: 8px; }
+    button.run { width: 100%; justify-content: center; }
+    .hunk-head { font-size: 11px; }
+    .line { font-size: 12px; }
+    .ask-actions { flex-wrap: wrap; }
+  }
+</style>
+</head>
+<body>
+<div class="mesh" aria-hidden="true"></div>
+
+<div class="wrap">
+  <header class="hero">
+    <div class="wordmark">
+      <span class="pip"></span>
+      ContriAI
+    </div>
+    <h1>Understand the issue<br><em>before</em> you touch the code.</h1>
+    <p class="sub">
+      Paste a GitHub issue URL. ContriAI reads it, maps the repository's file tree,
+      and returns a structured analysis — not a patch. You still decide what to do with it.
+      Try <code>github.com/owner/repo/issues/123</code>.
+    </p>
+  </header>
+
+  <div class="input-card">
+    <div class="term">
+      <div class="term-titlebar" aria-hidden="true">
+        <span class="tdot"></span>
+        <span class="tdot"></span>
+        <span class="tdot"></span>
+        <span class="term-label">contribai — analyze</span>
+      </div>
+      <form id="form" autocomplete="off">
+        <span class="prompt" aria-hidden="true">$</span>
+        <input
+          id="issueUrl"
+          type="text"
+          inputmode="url"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder="contribai analyze https://github.com/owner/repo/issues/123"
+          aria-label="GitHub issue URL"
+        />
+        <button class="run" type="submit" id="runBtn">Analyze</button>
+      </form>
+    </div>
+    <p class="hint" id="providerHint">checking AI provider…</p>
+  </div>
+
+  <div id="output" aria-live="polite" aria-atomic="false"></div>
+
+  <!-- ── Phase 2: Repository Navigator ── -->
+  <div class="section-divider" aria-hidden="true">
+    <span class="section-divider-line"></span>
+    <span class="section-divider-label">repository navigator</span>
+    <span class="section-divider-line"></span>
+  </div>
+
+  <div class="ask-card">
+    <div class="term ask-term">
+      <div class="term-titlebar" aria-hidden="true">
+        <span class="tdot"></span>
+        <span class="tdot"></span>
+        <span class="tdot"></span>
+        <span class="term-label">contribai — ask</span>
+      </div>
+      <form id="askForm" autocomplete="off">
+        <div class="ask-row">
+          <span class="prompt" aria-hidden="true">$</span>
+          <input
+            id="askRepo"
+            type="text"
+            spellcheck="false"
+            autocomplete="off"
+            placeholder="repo: github.com/owner/repo  or  owner/repo"
+            aria-label="GitHub repository"
+          />
+        </div>
+        <div class="ask-row">
+          <span class="prompt" aria-hidden="true">&gt;</span>
+          <input
+            id="askQuestion"
+            type="text"
+            spellcheck="false"
+            autocomplete="off"
+            placeholder="ask: Where is authentication implemented?"
+            aria-label="Question about the repository"
+          />
+        </div>
+        <div class="ask-actions">
+          <span class="ask-hint">searches actual source code — no embeddings, just grep</span>
+          <button class="run" type="submit" id="askBtn">Ask</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="askOutput" aria-live="polite" aria-atomic="false"></div>
+
+  <footer>ContriAI · runs locally · repository content only leaves this machine if you configure a cloud provider</footer>
+</div>
+
+<script>
+  const form         = document.getElementById('form');
+  const input        = document.getElementById('issueUrl');
+  const runBtn       = document.getElementById('runBtn');
+  const output       = document.getElementById('output');
+  const providerHint = document.getElementById('providerHint');
+
+  /* ── Provider health ── */
+  fetch('/api/health')
+    .then(r => r.json())
+    .then(d => {
+      providerHint.textContent = `provider: ${d.provider}`;
+      providerHint.className = 'hint ok';
+    })
+    .catch(() => {
+      providerHint.textContent = 'provider: unknown (is the backend running?)';
+      providerHint.className = 'hint err';
+    });
+
+  /* ── Helpers ── */
+  function esc(s) {
+    return (s || '').replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+  }
+
+  function lineRow(marker, cls, text) {
+    return `<div class="line ${cls}"><span class="marker">${marker}</span><span class="text">${esc(text)}</span></div>`;
+  }
+
+  /* ── Typewriter effect for the status line ── */
+  function typewriterStatus(url) {
+    const cmd = `contribai analyze ${url}`;
+    output.innerHTML = `
+      <div class="status-line">
+        <span class="status-prompt">$</span>
+        <span class="status-text" id="tw"></span><span class="cursor-bar"></span>
+      </div>`;
+    const tw = document.getElementById('tw');
+    let i = 0;
+    return new Promise(resolve => {
+      const tick = setInterval(() => {
+        tw.textContent = cmd.slice(0, ++i);
+        if (i >= cmd.length) { clearInterval(tick); resolve(); }
+      }, 22);
+    });
+  }
+
+  /* ── Render result ── */
+  function renderResult(r) {
+    let html = '';
+
+    html += `<div class="meta-line">
+      <a href="${esc(r.issue_url)}" target="_blank" rel="noopener noreferrer">${esc(r.repository)}</a>
+      <span class="meta-sep">·</span>
+      <span>${esc(r.issue_title)}</span>
+      <span class="meta-sep">·</span>
+      <span>${esc(r.provider)}</span>
+    </div>`;
+
+    /* Understanding */
+    html += `<div class="hunk"><div class="hunk-head">&nbsp;understanding&nbsp;</div>`;
+    html += r.understanding
+      ? `<div class="understanding-block">${esc(r.understanding)}</div>`
+      : `<div class="empty-note">model returned no summary</div>`;
+    html += `</div>`;
+
+    /* Relevant files */
+    html += `<div class="hunk"><div class="hunk-head">&nbsp;relevant files&nbsp;</div><div class="hunk-body">`;
+    if (r.relevant_files && r.relevant_files.length) {
+      html += r.relevant_files.map(f => lineRow('+', 'add', f)).join('');
+    } else {
+      html += `<div class="empty-note">no file-level matches — start from the README</div>`;
+    }
+    html += `</div></div>`;
+
+    /* Approach */
+    html += `<div class="hunk"><div class="hunk-head">&nbsp;suggested approach&nbsp;</div><div class="hunk-body">`;
+    if (r.approach && r.approach.length) {
+      html += r.approach.map((step, i) => lineRow(`${i + 1}`, 'context', step)).join('');
+    } else {
+      html += `<div class="empty-note">no approach returned</div>`;
+    }
+    html += `</div></div>`;
+
+    /* Risks */
+    html += `<div class="hunk"><div class="hunk-head">&nbsp;potential risks&nbsp;</div><div class="hunk-body">`;
+    if (r.risks && r.risks.length) {
+      html += r.risks.map(risk => lineRow('-', 'remove', risk)).join('');
+    } else {
+      html += `<div class="empty-note">no specific risks flagged</div>`;
+    }
+    html += `</div></div>`;
+
+    output.innerHTML = html;
+  }
+
+  /* ── Submit ── */
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const url = input.value.trim();
+    if (!url) { input.focus(); return; }
+
+    runBtn.disabled = true;
+    runBtn.textContent = 'Analyzing…';
+
+    /* Typewriter moment — then keep cursor blinking while we wait */
+    await typewriterStatus(url);
+
+    try {
+      const res  = await fetch('/api/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ issue_url: url }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        output.innerHTML = `<div class="error-box">error: ${esc(data.error || res.statusText)}</div>`;
+      } else {
+        renderResult(data);
+      }
+    } catch (err) {
+      output.innerHTML = `<div class="error-box">error: ${esc(err.message)}</div>`;
+    } finally {
+      runBtn.disabled = false;
+      runBtn.textContent = 'Analyze';
+    }
+  });
+
+  /* ── Phase 2: Ask a question about a repo ── */
+  const askForm     = document.getElementById('askForm');
+  const askRepo     = document.getElementById('askRepo');
+  const askQuestion = document.getElementById('askQuestion');
+  const askBtn      = document.getElementById('askBtn');
+  const askOutput   = document.getElementById('askOutput');
+
+  function typewriterAsk(repo, question) {
+    const cmd = `contribai ask ${repo} "${question}"`;
+    askOutput.innerHTML = `
+      <div class="status-line">
+        <span class="status-prompt">$</span>
+        <span class="status-text" id="askTw"></span><span class="cursor-bar"></span>
+      </div>`;
+    const tw = document.getElementById('askTw');
+    let i = 0;
+    return new Promise(resolve => {
+      const tick = setInterval(() => {
+        tw.textContent = cmd.slice(0, ++i);
+        if (i >= cmd.length) { clearInterval(tick); resolve(); }
+      }, 18);
+    });
+  }
+
+  function renderAskResult(r) {
+    let html = '';
+
+    /* meta */
+    html += `<div class="meta-line">
+      <span>${esc(r.provider)}</span>
+    </div>`;
+
+    /* Answer — same understanding-block prose style */
+    html += `<div class="hunk"><div class="hunk-head">&nbsp;answer&nbsp;</div>`;
+    html += r.answer
+      ? `<div class="understanding-block">${esc(r.answer)}</div>`
+      : `<div class="empty-note">model returned no answer</div>`;
+    html += `</div>`;
+
+    /* Cited files — same + add style as relevant files */
+    html += `<div class="hunk"><div class="hunk-head">&nbsp;source files used&nbsp;</div><div class="hunk-body">`;
+    if (r.cited_files && r.cited_files.length) {
+      html += r.cited_files.map(f => lineRow('+', 'add', f)).join('');
+    } else {
+      html += `<div class="empty-note">no specific files cited</div>`;
+    }
+    html += `</div></div>`;
+
+    askOutput.innerHTML = html;
+  }
+
+  askForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const repo = askRepo.value.trim();
+    const question = askQuestion.value.trim();
+    if (!repo) { askRepo.focus(); return; }
+    if (!question) { askQuestion.focus(); return; }
+
+    askBtn.disabled = true;
+    askBtn.textContent = 'Searching…';
+
+    await typewriterAsk(repo, question);
+
+    try {
+      const res  = await fetch('/api/ask', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repo_url: repo, question }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        askOutput.innerHTML = `<div class="error-box">error: ${esc(data.error || res.statusText)}</div>`;
+      } else {
+        renderAskResult(data);
+      }
+    } catch (err) {
+      askOutput.innerHTML = `<div class="error-box">error: ${esc(err.message)}</div>`;
+    } finally {
+      askBtn.disabled = false;
+      askBtn.textContent = 'Ask';
+    }
+  });
+</script>
+</body>
+</html>
