@@ -68,7 +68,7 @@ isn't locked to one backend:
 
 | Provider | Env var | What it does |
 |---|---|---|
-| `mock` *(default)* | — | Deterministic keyword-ranking, no LLM, no network call to any AI service. Exists so the tool is honestly useful with zero setup, and so the pipeline is testable offline. |
+| `mock` *(default)* | — | Deterministic keyword-ranking, no LLM, no network call to any AI service. It ranks issue file paths and repository-search snippets by keyword overlap, so both workflows work with zero setup (but it is not semantic code understanding). |
 | `ollama` | `CONTRIBAI_PROVIDER=ollama` | Talks to a local [Ollama](https://ollama.com) daemon — your repository content and issue text never leave your machine. |
 
 To use a local model:

@@ -80,3 +80,36 @@ func TestMockProviderHandlesNoMatches(t *testing.T) {
 		t.Errorf("expected no relevant files for non-matching keywords, got %v", out.RelevantFiles)
 	}
 }
+
+func TestMockProviderAnswersNavigatorPrompts(t *testing.T) {
+	prompt := strings.Join([]string{
+		"You are ContriAI.",
+		"QUESTION: Where is token validation implemented?",
+		"",
+		"CODE CONTEXT (from real source files — use only these):",
+		"",
+		"--- FILE: auth/token.go ---",
+		"func ValidateToken(token string) bool { return token != \"\" }",
+		"",
+		"--- FILE: server/server.go ---",
+		"func Start() {}",
+	}, "\n")
+
+	raw, err := NewMockProvider().Complete(context.Background(), prompt)
+	if err != nil {
+		t.Fatalf("Complete returned error: %v", err)
+	}
+	var out struct {
+		Answer     string   `json:"answer"`
+		CitedFiles []string `json:"cited_files"`
+	}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		t.Fatalf("mock provider did not return navigator JSON: %v\nraw: %s", err, raw)
+	}
+	if out.Answer == "" {
+		t.Error("expected a navigator answer")
+	}
+	if len(out.CitedFiles) != 1 || out.CitedFiles[0] != "auth/token.go" {
+		t.Errorf("expected auth/token.go to be cited, got %v", out.CitedFiles)
+	}
+}

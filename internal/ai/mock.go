@@ -30,6 +30,10 @@ func NewMockProvider() *MockProvider { return &MockProvider{} }
 func (p *MockProvider) Name() string { return "mock (no LLM configured)" }
 
 func (p *MockProvider) Complete(_ context.Context, prompt string) (string, error) {
+	if isNavigatorPrompt(prompt) {
+		return completeNavigatorPrompt(prompt)
+	}
+
 	title := extractBetween(prompt, mockMarkerIssueTitle, mockMarkerIssueBody)
 	body := extractBetween(prompt, mockMarkerIssueBody, mockMarkerRepo)
 	files := extractFiles(prompt)
@@ -78,6 +82,88 @@ func (p *MockProvider) Complete(_ context.Context, prompt string) (string, error
 		return "", err
 	}
 	return string(b), nil
+}
+
+// isNavigatorPrompt distinguishes the repository-question prompt from the
+// issue-analysis prompt. The mock provider supports both so ContriAI's
+// zero-setup mode remains useful across the whole UI.
+func isNavigatorPrompt(prompt string) bool {
+	return strings.Contains(prompt, "QUESTION:") && strings.Contains(prompt, "CODE CONTEXT")
+}
+
+type navigatorFile struct {
+	path    string
+	content string
+	score   int
+}
+
+func completeNavigatorPrompt(prompt string) (string, error) {
+	question := extractBetween(prompt, "QUESTION:", "CODE CONTEXT")
+	keywords := tokenize(question)
+	files := extractNavigatorFiles(prompt)
+
+	for i := range files {
+		files[i].score = scoreNavigatorFile(files[i], keywords)
+	}
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].score != files[j].score {
+			return files[i].score > files[j].score
+		}
+		return files[i].path < files[j].path
+	})
+
+	var cited []string
+	for _, f := range files {
+		if f.score > 0 {
+			cited = append(cited, f.path)
+		}
+	}
+
+	answer := "Heuristic pass only (no LLM configured): I ranked the provided code context by keyword overlap with your question. "
+	if len(cited) == 0 {
+		answer += "No supplied source snippets matched closely enough to support a file-specific answer. Try a question with concrete identifiers or configure Ollama for code-aware analysis."
+	} else {
+		answer += "Start with " + strings.Join(cited, ", ") + ". These files contain the strongest lexical matches, but verify the surrounding code before changing anything."
+	}
+
+	out := struct {
+		Answer     string   `json:"answer"`
+		CitedFiles []string `json:"cited_files"`
+	}{Answer: answer, CitedFiles: cited}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func extractNavigatorFiles(prompt string) []navigatorFile {
+	var files []navigatorFile
+	var current *navigatorFile
+	for _, line := range strings.Split(prompt, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "--- FILE: ") && strings.HasSuffix(line, " ---") {
+			path := strings.TrimSuffix(strings.TrimPrefix(line, "--- FILE: "), " ---")
+			files = append(files, navigatorFile{path: path})
+			current = &files[len(files)-1]
+			continue
+		}
+		if current != nil && !strings.HasPrefix(line, "Respond with ONLY a JSON object") {
+			current.content += " " + line
+		}
+	}
+	return files
+}
+
+func scoreNavigatorFile(file navigatorFile, keywords map[string]bool) int {
+	terms := tokenize(file.path + " " + file.content)
+	score := 0
+	for term := range terms {
+		if keywords[term] {
+			score++
+		}
+	}
+	return score
 }
 
 func extractBetween(s, startMarker, endMarker string) string {
