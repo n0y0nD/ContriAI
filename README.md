@@ -13,9 +13,9 @@ suggested approach, and risks worth thinking about.
 
 **Repository Navigator** — type a free-form question about any GitHub repo
 ("Where is authentication implemented?", "Which files handle CLI parsing?");
-ContriAI downloads the actual source, searches it with keyword-based grep,
-builds a prompt grounded in real code snippets, and returns an answer that
-cites the exact files it used.
+ContriAI downloads the actual source, chunks it into a local retrieval index,
+finds the most relevant code sections with TF-IDF vector similarity, and
+returns an answer that cites the exact files and source ranges it used.
 
 It is **not** an autonomous PR bot. It never opens branches, writes code,
 or submits pull requests on its own. It explains; the developer decides.
@@ -26,9 +26,38 @@ Issue Analyzer:
                    → structured analysis → rendered in the browser
 
 Repository Navigator:
-  owner/repo + question → download source tarball → keyword search
-                        → grounded prompt + LLM → answer + cited files
+  owner/repo + question → download source tarball → chunk + local vector index
+                        → retrieve source ranges → grounded prompt + LLM
+                        → answer + cited files
 ```
+
+## How a request flows through ContriAI
+
+```mermaid
+flowchart TD
+    Browser[Browser UI] -->|POST /api/analyze| Analyze[Issue Analyzer]
+    Browser -->|POST /api/ask| Ask[Repository Navigator]
+
+    Analyze --> Issue[GitHub issue API]
+    Analyze --> Tree[GitHub repository tree API]
+    Issue --> IssuePrompt[Structured issue prompt]
+    Tree --> IssuePrompt
+
+    Ask --> Tarball[GitHub source tarball]
+    Tarball --> Cache[5-minute repository cache]
+    Cache --> Index[Local RAG index\nsource chunks + TF-IDF vectors]
+    Index --> Retrieve[Cosine-similarity retrieval]
+    Retrieve --> CodePrompt[Grounded code-context prompt]
+
+    IssuePrompt --> Provider{AI provider}
+    CodePrompt --> Provider
+    Provider -->|mock or local Ollama| Response[Structured JSON response]
+    Response --> Browser
+```
+
+The Navigator keeps both the downloaded repository and its local RAG index in
+memory for five minutes. Every answer exposes the retrieved source ranges so a
+developer can inspect the evidence behind it.
 
 ## Quick start
 
@@ -119,12 +148,14 @@ Tests: `go test ./...`.
 
 ## Roadmap
 
-Phases 1 and 2 are shipped. Each later phase is a real, separately-shippable
+Phases 1, 2, and 3 are shipped. Each later phase is a real, separately-shippable
 increment:
 
-- **Phase 3 — Repository RAG.** Chunk + embed the repo into a vector store
-  so large monorepos get real semantic search instead of keyword/filename
-  matching.
+- **Phase 3 — Repository RAG.** Shipped: source is chunked and indexed in a
+  local, in-memory TF-IDF vector store for the five-minute repository-cache
+  lifetime. This improves retrieval granularity and provides inspectable line
+  ranges without sending code to an embedding service. Semantic embeddings are
+  a future enhancement.
 - **Phase 4 — More local AI.** Broader local-model support beyond Ollama;
   provider selection already supports this without a redesign.
 - **Phase 5 — Contribution planner.** Turn the approach list into a

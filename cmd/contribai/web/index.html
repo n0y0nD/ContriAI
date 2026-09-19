@@ -683,7 +683,7 @@
           />
         </div>
         <div class="ask-actions">
-          <span class="ask-hint">searches actual source code — no embeddings, just grep</span>
+          <span class="ask-hint">local RAG — chunked source retrieval with cited line ranges</span>
           <button class="run" type="submit" id="askBtn">Ask</button>
         </div>
       </form>
@@ -869,6 +869,18 @@
       html += r.cited_files.map(f => lineRow('+', 'add', f)).join('');
     } else {
       html += `<div class="empty-note">no specific files cited</div>`;
+    }
+    html += `</div></div>`;
+
+    /* Retrieved chunks — provenance independent of model-selected citations */
+    html += `<div class="hunk"><div class="hunk-head">&nbsp;retrieved context&nbsp;</div><div class="hunk-body">`;
+    if (r.retrieved_chunks && r.retrieved_chunks.length) {
+      html += r.retrieved_chunks.map(chunk => {
+        const score = Number(chunk.score || 0).toFixed(3);
+        return lineRow('>', 'context', `${chunk.path}:${chunk.start_line}-${chunk.end_line} · relevance ${score}`);
+      }).join('');
+    } else {
+      html += `<div class="empty-note">no source chunks matched this question</div>`;
     }
     html += `</div></div>`;
 

@@ -1,14 +1,14 @@
-// Package navigator implements ContriAI Phase 2: Repository Navigator.
+// Package navigator implements ContriAI's Repository Navigator.
 // Given a GitHub repository (owner/repo) and a free-form question, it
 // downloads the source, searches it for keyword-relevant files and snippets,
 // builds a grounded prompt, and returns an LLM-generated answer citing the
 // actual files it used.
 //
-// Strategy (Phase 2 — no embeddings yet):
+// Strategy (Phase 3 — local retrieval-augmented generation):
 //  1. Download the repo as a tarball via GitHub REST API → temp dir.
-//  2. Extract keywords from the question; search files/content with grep.
-//  3. Cap the context (filename matches + short snippets) and send to the
-//     existing ai.Provider.Complete interface.
+//  2. Chunk supported source files and build a local TF-IDF vector index.
+//  3. Retrieve the most relevant chunks by cosine similarity and send their
+//     bounded context to the existing ai.Provider.Complete interface.
 //  4. Parse {answer, cited_files} from the response.
 //  5. Clean up the temp dir after use.
 package navigator
@@ -32,6 +32,7 @@ import (
 	"unicode"
 
 	"contribai/internal/ai"
+	"contribai/internal/rag"
 )
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -48,9 +49,18 @@ type Request struct {
 
 // Response is the output of Navigator.Ask.
 type Response struct {
-	Answer     string   `json:"answer"`
-	CitedFiles []string `json:"cited_files"`
-	Provider   string   `json:"provider"`
+	Answer          string           `json:"answer"`
+	CitedFiles      []string         `json:"cited_files"`
+	RetrievedChunks []RetrievedChunk `json:"retrieved_chunks"`
+	Provider        string           `json:"provider"`
+}
+
+// RetrievedChunk exposes the exact source range used to ground an answer.
+type RetrievedChunk struct {
+	Path      string  `json:"path"`
+	StartLine int     `json:"start_line"`
+	EndLine   int     `json:"end_line"`
+	Score     float64 `json:"score"`
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -94,6 +104,7 @@ func newWithBase(provider ai.Provider, token, base string, hc *http.Client) *Nav
 
 type cacheEntry struct {
 	dir     string
+	index   *rag.Index
 	expires time.Time
 }
 
@@ -155,6 +166,34 @@ func (n *Navigator) acquireRepo(ctx context.Context, owner, repo, ref string) (d
 	}()
 
 	return dir, nil
+}
+
+// acquireIndex returns the local vector index for a cached repository. The
+// index is built once per downloaded snapshot and lives for the same TTL.
+func (n *Navigator) acquireIndex(ctx context.Context, owner, repo, ref string) (*rag.Index, error) {
+	dir, err := n.acquireRepo(ctx, owner, repo, ref)
+	if err != nil {
+		return nil, err
+	}
+	key := cacheKey(owner, repo, ref)
+	cacheMu.Lock()
+	if entry, ok := cache[key]; ok && entry.dir == dir && entry.index != nil {
+		cacheMu.Unlock()
+		return entry.index, nil
+	}
+	cacheMu.Unlock()
+
+	index, err := rag.Build(dir)
+	if err != nil {
+		return nil, err
+	}
+	cacheMu.Lock()
+	if entry, ok := cache[key]; ok && entry.dir == dir {
+		entry.index = index
+		cache[key] = entry
+	}
+	cacheMu.Unlock()
+	return index, nil
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -456,7 +495,7 @@ func extractKeywords(question string) []string {
 // Prompt building
 // ──────────────────────────────────────────────────────────────────────────────
 
-func buildAskPrompt(owner, repo, question string, results []searchResult) string {
+func buildAskPrompt(owner, repo, question string, results []rag.Chunk) string {
 	var b strings.Builder
 
 	b.WriteString("You are ContriAI, an assistant that answers questions about a GitHub repository's source code.\n")
@@ -473,13 +512,9 @@ func buildAskPrompt(owner, repo, question string, results []searchResult) string
 		b.WriteString("CODE CONTEXT (from real source files — use only these):\n\n")
 		for _, r := range results {
 			fmt.Fprintf(&b, "--- FILE: %s ---\n", r.Path)
-			if len(r.Matches) > 0 {
-				for _, line := range r.Matches {
-					b.WriteString("  " + line + "\n")
-				}
-			} else {
-				b.WriteString("  (filename matched but no relevant lines extracted)\n")
-			}
+			fmt.Fprintf(&b, "--- LINES: %d-%d ---\n", r.StartLine, r.EndLine)
+			b.WriteString(r.Content)
+			b.WriteString("\n")
 			b.WriteString("\n")
 		}
 	}
@@ -529,12 +564,11 @@ func (n *Navigator) Ask(ctx context.Context, req Request) (*Response, error) {
 		return nil, fmt.Errorf("question is required")
 	}
 
-	repoDir, err := n.acquireRepo(ctx, req.Owner, req.Repo, req.Ref)
+	index, err := n.acquireIndex(ctx, req.Owner, req.Repo, req.Ref)
 	if err != nil {
-		return nil, fmt.Errorf("fetching repository source: %w", err)
+		return nil, fmt.Errorf("preparing repository index: %w", err)
 	}
-
-	results := searchRepo(repoDir, req.Question)
+	results := index.Search(req.Question, maxMatchFiles)
 	prompt := buildAskPrompt(req.Owner, req.Repo, req.Question, results)
 
 	raw, err := n.provider.Complete(ctx, prompt)
@@ -543,10 +577,18 @@ func (n *Navigator) Ask(ctx context.Context, req Request) (*Response, error) {
 	}
 
 	answer, cited := parseAskOutput(raw)
+	retrieved := make([]RetrievedChunk, len(results))
+	for i, chunk := range results {
+		retrieved[i] = RetrievedChunk{
+			Path: chunk.Path, StartLine: chunk.StartLine, EndLine: chunk.EndLine,
+			Score: chunk.Score,
+		}
+	}
 
 	return &Response{
-		Answer:     answer,
-		CitedFiles: cited,
-		Provider:   n.provider.Name(),
+		Answer:          answer,
+		CitedFiles:      cited,
+		RetrievedChunks: retrieved,
+		Provider:        n.provider.Name(),
 	}, nil
 }

@@ -2,8 +2,8 @@ package navigator
 
 import (
 	"archive/tar"
-	"compress/gzip"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -318,6 +318,15 @@ func Start(addr string) error { return nil }
 	}
 	if len(resp.CitedFiles) == 0 {
 		t.Error("expected at least one cited file")
+	}
+	if len(resp.RetrievedChunks) == 0 {
+		t.Fatal("expected retrieved RAG chunks")
+	}
+	if resp.RetrievedChunks[0].Path != "auth/token.go" && resp.RetrievedChunks[0].Path != "auth/middleware.go" {
+		t.Errorf("expected an auth chunk first, got %#v", resp.RetrievedChunks[0])
+	}
+	if resp.RetrievedChunks[0].StartLine < 1 || resp.RetrievedChunks[0].EndLine < resp.RetrievedChunks[0].StartLine {
+		t.Errorf("invalid retrieved source range: %#v", resp.RetrievedChunks[0])
 	}
 
 	// At least one auth file should be cited.
