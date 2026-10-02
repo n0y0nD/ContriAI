@@ -37,10 +37,19 @@ func (p *OllamaProvider) Name() string {
 }
 
 type ollamaGenerateRequest struct {
-	Model  string `json:"model"`
-	Prompt string `json:"prompt"`
-	Stream bool   `json:"stream"`
-	Format string `json:"format,omitempty"`
+	Model   string        `json:"model"`
+	Prompt  string        `json:"prompt"`
+	Stream  bool          `json:"stream"`
+	Format  string        `json:"format,omitempty"`
+	Options ollamaOptions `json:"options,omitempty"`
+}
+
+// ollamaOptions bound response generation so UI requests remain responsive.
+// The prompts require JSON, so a low temperature favors valid, repeatable
+// structured responses over creative prose.
+type ollamaOptions struct {
+	Temperature float64 `json:"temperature,omitempty"`
+	NumPredict  int     `json:"num_predict,omitempty"`
 }
 
 type ollamaGenerateResponse struct {
@@ -53,6 +62,11 @@ func (p *OllamaProvider) Complete(ctx context.Context, prompt string) (string, e
 		Model:  p.model,
 		Prompt: prompt,
 		Stream: false,
+		Format: "json",
+		Options: ollamaOptions{
+			Temperature: 0.2,
+			NumPredict:  600,
+		},
 	})
 	if err != nil {
 		return "", err

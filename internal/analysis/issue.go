@@ -12,6 +12,7 @@ import (
 
 	"contribai/internal/ai"
 	gh "contribai/internal/github"
+	"contribai/internal/rag"
 )
 
 // Section markers shared with internal/ai's Mock provider so it can parse
@@ -23,21 +24,34 @@ const (
 	markerFileTree   = "FILE TREE:"
 )
 
-// maxTreeEntries bounds how many file paths get sent to the model. Large
-// monorepos would otherwise blow the context window for no real benefit —
-// Phase 1 relies on filename relevance, not full source, per the roadmap's
-// "don't build the RAG pipeline yet" guidance.
+// maxTreeEntries bounds fallback file-tree context. Source-level context comes
+// from the bounded RAG retrieval path below.
 const maxTreeEntries = 300
+
+// maxIssueChunks keeps local models responsive. Four 60-line chunks retain
+// source-level grounding without competing with the issue text for context.
+const maxIssueChunks = 4
 
 // Analyzer wires a GitHub client to an AI provider to produce Results.
 type Analyzer struct {
-	GitHub   *gh.Client
-	Provider ai.Provider
+	GitHub    *gh.Client
+	Provider  ai.Provider
+	Retriever SourceRetriever
+}
+
+// SourceRetriever supplies repository chunks relevant to a query. Navigator
+// implements this interface without making analysis depend on its package.
+type SourceRetriever interface {
+	Retrieve(ctx context.Context, owner, repo, ref, query string) ([]rag.Chunk, error)
 }
 
 // New builds an Analyzer.
-func New(githubClient *gh.Client, provider ai.Provider) *Analyzer {
-	return &Analyzer{GitHub: githubClient, Provider: provider}
+func New(githubClient *gh.Client, provider ai.Provider, retrievers ...SourceRetriever) *Analyzer {
+	a := &Analyzer{GitHub: githubClient, Provider: provider}
+	if len(retrievers) > 0 {
+		a.Retriever = retrievers[0]
+	}
+	return a
 }
 
 // Analyze runs the full Phase 1 pipeline for a single issue URL.
@@ -69,7 +83,20 @@ func (a *Analyzer) Analyze(ctx context.Context, issueURL string) (*Result, error
 		tree = nil
 	}
 
-	prompt := buildPrompt(issue, repo, tree, truncated)
+	var chunks []rag.Chunk
+	if a.Retriever != nil {
+		chunks, err = a.Retriever.Retrieve(ctx, ref.Owner, ref.Repo, branch, issue.Title+"\n"+issue.Body)
+		if err != nil {
+			// Keep issue analysis available when the source archive cannot be
+			// downloaded; the file tree is still useful fallback context.
+			chunks = nil
+		}
+	}
+	if len(chunks) > maxIssueChunks {
+		chunks = chunks[:maxIssueChunks]
+	}
+
+	prompt := buildPrompt(issue, repo, tree, truncated, chunks)
 
 	raw, err := a.Provider.Complete(ctx, prompt)
 	if err != nil {
@@ -81,10 +108,12 @@ func (a *Analyzer) Analyze(ctx context.Context, issueURL string) (*Result, error
 	result.IssueURL = issue.HTMLURL
 	result.Repository = repo.FullName
 	result.Provider = a.Provider.Name()
+	result.RelevantFiles = validateRelevantFiles(result.RelevantFiles, chunks, tree)
+	result.RetrievedChunks = toRetrievedChunks(chunks)
 	return result, nil
 }
 
-func buildPrompt(issue *gh.Issue, repo *gh.Repository, tree []gh.TreeEntry, truncated bool) string {
+func buildPrompt(issue *gh.Issue, repo *gh.Repository, tree []gh.TreeEntry, truncated bool, chunks []rag.Chunk) string {
 	var b strings.Builder
 
 	b.WriteString("You are ContriAI, an assistant that helps a developer understand a GitHub issue well enough to start contributing. ")
@@ -95,7 +124,9 @@ func buildPrompt(issue *gh.Issue, repo *gh.Repository, tree []gh.TreeEntry, trun
 	fmt.Fprintf(&b, "%s %s — %s (primary language: %s)\n\n", markerRepo, repo.FullName, orPlaceholder(repo.Description, "no description"), orPlaceholder(repo.Language, "unknown"))
 
 	b.WriteString(markerFileTree + "\n")
-	if len(tree) == 0 {
+	if len(chunks) > 0 {
+		b.WriteString("(source retrieval is available; omitted to keep the model context focused)\n")
+	} else if len(tree) == 0 {
 		b.WriteString("(unavailable)\n")
 	} else {
 		for _, e := range tree {
@@ -108,11 +139,52 @@ func buildPrompt(issue *gh.Issue, repo *gh.Repository, tree []gh.TreeEntry, trun
 		}
 	}
 
+	b.WriteString("\nSOURCE CONTEXT:\n")
+	if len(chunks) == 0 {
+		b.WriteString("(unavailable)\n")
+	} else {
+		for _, chunk := range chunks {
+			fmt.Fprintf(&b, "--- FILE: %s ---\n--- LINES: %d-%d ---\n%s\n\n", chunk.Path, chunk.StartLine, chunk.EndLine, chunk.Content)
+		}
+	}
+
 	b.WriteString("\nRespond with ONLY a JSON object (no markdown fences, no commentary) matching exactly this shape:\n")
 	b.WriteString(`{"understanding":"2-4 sentences on what the issue is actually asking for","relevant_files":["path/one","path/two"],"approach":["step 1","step 2","step 3"],"risks":["risk 1","risk 2"]}`)
-	b.WriteString("\nPick relevant_files ONLY from the file tree above. If nothing looks relevant, return an empty list rather than guessing a path that wasn't shown.\n")
+	b.WriteString("\nPick relevant_files ONLY from SOURCE CONTEXT when it is available. If it is unavailable, use only FILE TREE paths. If nothing looks relevant, return an empty list rather than guessing.\n")
 
 	return b.String()
+}
+
+func validateRelevantFiles(files []string, chunks []rag.Chunk, tree []gh.TreeEntry) []string {
+	allowed := map[string]bool{}
+	if len(chunks) > 0 {
+		for _, chunk := range chunks {
+			allowed[chunk.Path] = true
+		}
+	} else {
+		for _, entry := range tree {
+			if entry.Type == "blob" {
+				allowed[entry.Path] = true
+			}
+		}
+	}
+	seen := map[string]bool{}
+	var valid []string
+	for _, file := range files {
+		if allowed[file] && !seen[file] {
+			valid = append(valid, file)
+			seen[file] = true
+		}
+	}
+	return valid
+}
+
+func toRetrievedChunks(chunks []rag.Chunk) []RetrievedChunk {
+	result := make([]RetrievedChunk, len(chunks))
+	for i, chunk := range chunks {
+		result[i] = RetrievedChunk{Path: chunk.Path, StartLine: chunk.StartLine, EndLine: chunk.EndLine, Score: chunk.Score}
+	}
+	return result
 }
 
 func orPlaceholder(s, placeholder string) string {

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	gh "contribai/internal/github"
+	"contribai/internal/rag"
 )
 
 func TestBuildPromptIncludesCoreSections(t *testing.T) {
@@ -15,7 +16,7 @@ func TestBuildPromptIncludesCoreSections(t *testing.T) {
 		{Path: "internal/runner", Type: "tree"}, // dirs should be skipped
 	}
 
-	prompt := buildPrompt(issue, repo, tree, false)
+	prompt := buildPrompt(issue, repo, tree, false, nil)
 
 	for _, want := range []string{
 		"ISSUE TITLE: Fix flaky test",
@@ -30,6 +31,18 @@ func TestBuildPromptIncludesCoreSections(t *testing.T) {
 	}
 	if strings.Contains(prompt, "- internal/runner\n") {
 		t.Errorf("directory entries should not be listed as files")
+	}
+}
+
+func TestValidateRelevantFilesRestrictsResultsToRetrievedChunks(t *testing.T) {
+	chunks := []rag.Chunk{{Path: "ui/components/Layout.tsx"}}
+	files := validateRelevantFiles(
+		[]string{"index.html", "ui/components/Layout.tsx", "ui/components/Layout.tsx"},
+		chunks,
+		nil,
+	)
+	if len(files) != 1 || files[0] != "ui/components/Layout.tsx" {
+		t.Errorf("expected only retrieved path to survive validation, got %v", files)
 	}
 }
 

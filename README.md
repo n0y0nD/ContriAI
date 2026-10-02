@@ -7,9 +7,9 @@ unfamiliar GitHub repository well enough to start contributing. It ships
 two capabilities today:
 
 **Issue Analyzer** — paste a GitHub issue URL; ContriAI fetches the issue,
-maps the repository's file tree, asks an LLM to explain what's being asked,
-and returns a structured breakdown: understanding, likely relevant files, a
-suggested approach, and risks worth thinking about.
+maps the repository's file tree, retrieves relevant source chunks through the
+local RAG index, and returns a structured breakdown: understanding, verified
+relevant files, a suggested approach, and risks worth thinking about.
 
 **Repository Navigator** — type a free-form question about any GitHub repo
 ("Where is authentication implemented?", "Which files handle CLI parsing?");
@@ -22,8 +22,8 @@ or submits pull requests on its own. It explains; the developer decides.
 
 ```
 Issue Analyzer:
-  GitHub issue URL → fetch issue + repo file tree → prompt LLM
-                   → structured analysis → rendered in the browser
+  GitHub issue URL → fetch issue + repo file tree + RAG source chunks
+                   → grounded prompt + validated files → structured analysis
 
 Repository Navigator:
   owner/repo + question → download source tarball → chunk + local vector index
@@ -42,6 +42,8 @@ flowchart TD
     Analyze --> Tree[GitHub repository tree API]
     Issue --> IssuePrompt[Structured issue prompt]
     Tree --> IssuePrompt
+    Analyze --> Cache
+    Retrieve --> IssuePrompt
 
     Ask --> Tarball[GitHub source tarball]
     Tarball --> Cache[5-minute repository cache]
@@ -55,9 +57,10 @@ flowchart TD
     Response --> Browser
 ```
 
-The Navigator keeps both the downloaded repository and its local RAG index in
-memory for five minutes. Every answer exposes the retrieved source ranges so a
-developer can inspect the evidence behind it.
+The Navigator and Issue Analyzer share the downloaded-repository cache and its
+local RAG index for five minutes. Every result exposes retrieved source ranges;
+Issue Analyzer also discards model-suggested file paths that are not part of
+the retrieved evidence.
 
 ## Quick start
 

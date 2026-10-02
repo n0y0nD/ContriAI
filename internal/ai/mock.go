@@ -37,6 +37,9 @@ func (p *MockProvider) Complete(_ context.Context, prompt string) (string, error
 	title := extractBetween(prompt, mockMarkerIssueTitle, mockMarkerIssueBody)
 	body := extractBetween(prompt, mockMarkerIssueBody, mockMarkerRepo)
 	files := extractFiles(prompt)
+	if len(files) == 0 {
+		files = extractSourceFiles(prompt)
+	}
 
 	keywords := tokenize(title + " " + body)
 	ranked := rankFiles(files, keywords)
@@ -190,6 +193,23 @@ func extractFiles(prompt string) []string {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "- ") {
 			files = append(files, strings.TrimPrefix(line, "- "))
+		}
+	}
+	return files
+}
+
+// extractSourceFiles reads RAG evidence markers used by Issue Analyzer. It is
+// the mock-provider equivalent of source-grounded file selection when the
+// full file tree is intentionally omitted to keep a prompt compact.
+func extractSourceFiles(prompt string) []string {
+	var files []string
+	for _, line := range strings.Split(prompt, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "--- FILE: ") && strings.HasSuffix(line, " ---") {
+			path := strings.TrimSuffix(strings.TrimPrefix(line, "--- FILE: "), " ---")
+			if path != "" {
+				files = append(files, path)
+			}
 		}
 	}
 	return files

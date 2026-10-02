@@ -4,7 +4,8 @@
 //
 // Phase 1: issue analyzer (fetch issue + repo file tree, ask an LLM to explain it).
 // Phase 2: repository navigator (download source, grep-search it, answer
-//           free-form questions grounded in the actual code).
+//
+//	free-form questions grounded in the actual code).
 package main
 
 import (
@@ -32,8 +33,8 @@ func main() {
 	githubToken := os.Getenv("GITHUB_TOKEN")
 
 	provider := selectProvider()
-	analyzer := analysis.New(gh.NewClient(githubToken), provider)
 	nav := navigator.New(provider, githubToken)
+	analyzer := analysis.New(gh.NewClient(githubToken), provider, nav)
 
 	static, err := fs.Sub(webFS, "web")
 	if err != nil {
@@ -98,7 +99,10 @@ func analyzeHandler(analyzer *analysis.Analyzer) http.HandlerFunc {
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+		// An initial RAG-backed issue analysis can download and index a large
+		// repository before asking the local model. Keep that work within one
+		// request context, but allow enough time for a cold repository cache.
+		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Minute)
 		defer cancel()
 
 		result, err := analyzer.Analyze(ctx, req.IssueURL)
@@ -168,8 +172,9 @@ func askHandler(nav *navigator.Navigator) http.HandlerFunc {
 			return
 		}
 
-		// Generous timeout: downloading a tarball + LLM call.
-		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+		// A cold repository cache may need a tarball download, local indexing,
+		// and an LLM call before it can return a grounded answer.
+		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Minute)
 		defer cancel()
 
 		resp, err := nav.Ask(ctx, navigator.Request{

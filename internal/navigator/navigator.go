@@ -196,6 +196,20 @@ func (n *Navigator) acquireIndex(ctx context.Context, owner, repo, ref string) (
 	return index, nil
 }
 
+// Retrieve returns source chunks relevant to a repository question or issue.
+// It is shared by the repository navigator and issue analyzer so both features
+// ground model output in the same cached local RAG index.
+func (n *Navigator) Retrieve(ctx context.Context, owner, repo, ref, query string) ([]rag.Chunk, error) {
+	if strings.TrimSpace(query) == "" {
+		return nil, fmt.Errorf("retrieval query is required")
+	}
+	index, err := n.acquireIndex(ctx, owner, repo, ref)
+	if err != nil {
+		return nil, err
+	}
+	return index.Search(query, maxMatchFiles), nil
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Repo download (GitHub tarball)
 // ──────────────────────────────────────────────────────────────────────────────
@@ -564,11 +578,10 @@ func (n *Navigator) Ask(ctx context.Context, req Request) (*Response, error) {
 		return nil, fmt.Errorf("question is required")
 	}
 
-	index, err := n.acquireIndex(ctx, req.Owner, req.Repo, req.Ref)
+	results, err := n.Retrieve(ctx, req.Owner, req.Repo, req.Ref, req.Question)
 	if err != nil {
 		return nil, fmt.Errorf("preparing repository index: %w", err)
 	}
-	results := index.Search(req.Question, maxMatchFiles)
 	prompt := buildAskPrompt(req.Owner, req.Repo, req.Question, results)
 
 	raw, err := n.provider.Complete(ctx, prompt)

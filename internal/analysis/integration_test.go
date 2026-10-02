@@ -10,7 +10,17 @@ import (
 
 	"contribai/internal/ai"
 	gh "contribai/internal/github"
+	"contribai/internal/rag"
 )
+
+type fakeRetriever struct{}
+
+func (fakeRetriever) Retrieve(_ context.Context, _, _, _, _ string) ([]rag.Chunk, error) {
+	return []rag.Chunk{{
+		Path: "auth/token.go", StartLine: 1, EndLine: 4, Score: 0.82,
+		Content: "package auth\nfunc ValidateToken(token string) bool { return token != \"\" }",
+	}}, nil
+}
 
 // TestAnalyzeEndToEnd exercises the full Phase 1 pipeline — issue fetch,
 // repo fetch, tree fetch, prompt build, mock AI provider, response parsing
@@ -48,7 +58,7 @@ func TestAnalyzeEndToEnd(t *testing.T) {
 	defer server.Close()
 
 	client := gh.NewClientWithBaseURL("", server.URL)
-	analyzer := New(client, ai.NewMockProvider())
+	analyzer := New(client, ai.NewMockProvider(), fakeRetriever{})
 
 	result, err := analyzer.Analyze(context.Background(), "https://github.com/example/repo/issues/42")
 	if err != nil {
@@ -78,5 +88,8 @@ func TestAnalyzeEndToEnd(t *testing.T) {
 	}
 	if result.Provider == "" {
 		t.Error("expected provider name to be set")
+	}
+	if len(result.RetrievedChunks) != 1 || result.RetrievedChunks[0].Path != "auth/token.go" {
+		t.Errorf("expected returned RAG source evidence, got %v", result.RetrievedChunks)
 	}
 }

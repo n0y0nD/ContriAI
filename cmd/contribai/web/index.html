@@ -771,6 +771,18 @@
     }
     html += `</div></div>`;
 
+    /* Retrieved source chunks make the issue analysis auditable. */
+    html += `<div class="hunk"><div class="hunk-head">&nbsp;retrieved source context&nbsp;</div><div class="hunk-body">`;
+    if (r.retrieved_chunks && r.retrieved_chunks.length) {
+      html += r.retrieved_chunks.map(chunk => {
+        const score = Number(chunk.score || 0).toFixed(3);
+        return lineRow('>', 'context', `${chunk.path}:${chunk.start_line}-${chunk.end_line} · relevance ${score}`);
+      }).join('');
+    } else {
+      html += `<div class="empty-note">source retrieval was unavailable; results are based on the file tree</div>`;
+    }
+    html += `</div></div>`;
+
     /* Approach */
     html += `<div class="hunk"><div class="hunk-head">&nbsp;suggested approach&nbsp;</div><div class="hunk-body">`;
     if (r.approach && r.approach.length) {
